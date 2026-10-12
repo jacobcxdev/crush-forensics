@@ -245,12 +245,16 @@ The Filesystem panel's **Tree / Grid** selector switches between the hierarchy
 and a folder browser. Grid displays one directory as large tiles. Double-click a
 folder to enter it, use **Up** to return to its parent, and double-click a file to
 open it. The view choice is remembered. Filtering also works in Grid; clearing
-the filter returns to the current directory.
+the filter returns to the current directory. Long file names are shortened in
+the middle while keeping the extension visible.
 
 **View → Show thumbnails** adds image and video previews in either view and in
 search results. It is off by default and remembers your choice. Only visible
 items are decoded, in the background, with a bounded memory cache; no thumbnail
 files are saved. Closing a source or disabling previews clears the cache.
+Loading uses up to four workers, skips queued items that scroll out of view,
+and stops obsolete work between reads and decoding steps. Results share cached
+GUI icons and batched repaints so a slow file does not hold up the whole folder.
 Unsupported or damaged files keep their normal presentation. Image previews
 skip files larger than 32 MiB and images above 40 megapixels. Video previews read
 a frame through the source stream with an I/O limit. Videos above 32 MiB use
@@ -536,6 +540,15 @@ Displays JPEG, PNG, GIF, BMP, WebP, TIFF, HEIC, HEIF, AVIF, and JPEG XL images. 
 ### Media Viewer
 
 Plays audio and video files (MP4, MOV, MP3, M4A, AAC, WAV, etc.) using the system multimedia backend.
+
+**Loop** repeats playback until you turn it off or close the tab. It is off by
+default for each viewer. The **↶ / ↷** buttons rotate the video left or right
+in 90° steps. The rotated video refits when the viewer is resized. Rotation
+affects the display only; it does not modify the source file. Photo viewers
+have the same rotation buttons in their toolbar.
+
+Closing the viewer stops playback even when Loop is enabled. The PCM audio
+fallback hides the video controls.
 
 ### Plist / Tree Viewer
 

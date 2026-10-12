@@ -38,6 +38,20 @@ def _index(panel, name):
                 if model.index(i, 0, root).data() == name)
 
 
+@pytest.mark.parametrize("name", ["a" * 180 + ".mp4", "long filename " * 15 + ".jpeg",
+                                 "archive.name." * 12 + "tar.gz"])
+def test_grid_labels_always_fit_with_extension_visible(panel, name):
+    panel.set_view_mode("grid")
+    index = _index(panel, "file.txt")
+    panel._model.itemFromIndex(panel._proxy.mapToSource(index)).setText(name)
+    option = QStyleOptionViewItem()
+    panel._grid.itemDelegate().initStyleOption(option, index)
+    assert option.text.endswith("." + name.rsplit(".", 1)[1])
+    assert option.fontMetrics.horizontalAdvance(option.text) <= panel._grid.gridSize().width() - 12
+    assert not option.features & QStyleOptionViewItem.ViewItemFeature.WrapText
+    assert index.data() == name
+
+
 def test_grid_navigates_folders_opens_files_and_goes_up(panel, qtbot):
     assert panel.view_mode == "tree"
     panel.set_view_mode("grid")

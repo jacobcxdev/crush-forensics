@@ -7,7 +7,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from PySide6.QtCore import QObject, QSize, Signal
+from PySide6.QtCore import QObject, QPersistentModelIndex, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QListView, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTreeView
 
@@ -19,6 +19,9 @@ _SIZE = 160
 _MAX_FILE_BYTES = 32 << 20
 _MAX_PIXELS = 40_000_000
 _CACHE_ENTRIES = 256
+_WORKERS = 4
+_MAX_PENDING = 128
+_PLUGIN_LOCK = threading.Lock()
 _VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm", ".3gp", ".3g2", ".mpeg", ".mpg", ".ts"}
 
 
@@ -31,7 +34,7 @@ def _looks_like_video(head: bytes, node: VFSNode) -> bool:
 class _PreviewStream(io.RawIOBase):
     """Limit decoder I/O, and defer size-probing seeks until bytes are read."""
 
-    def __init__(self, stream, size: int, *, cheap_seeks: bool = False) -> None:
+    def __init__(self, stream, size: int, *, cheap_seeks: bool = False, cancelled=None) -> None:
         super().__init__()
         self._stream = stream
         self._size = size
@@ -39,6 +42,7 @@ class _PreviewStream(io.RawIOBase):
         self._remaining = _MAX_FILE_BYTES
         self._deadline = time.monotonic() + 5
         self._cheap_seeks = cheap_seeks or isinstance(stream, io.BytesIO)
+        self._cancelled = cancelled or (lambda: False)
 
     def readable(self) -> bool:
         return True
@@ -58,7 +62,7 @@ class _PreviewStream(io.RawIOBase):
         return position
 
     def read(self, size: int = -1) -> bytes:
-        if time.monotonic() > self._deadline or self._remaining <= 0:
+        if self._cancelled() or time.monotonic() > self._deadline or self._remaining <= 0:
             raise OSError("Video preview I/O limit reached")
         current = self._stream.tell()
         if not self._cheap_seeks:
@@ -68,6 +72,8 @@ class _PreviewStream(io.RawIOBase):
                 raise OSError("Video preview seek limit reached")
             self._remaining -= cost
         with background_io():
+            if self._cancelled():
+                raise OSError("Video preview cancelled")
             if current != self._position:
                 self._stream.seek(self._position)
             data = self._stream.read(min(self._remaining, size) if size >= 0 else self._remaining)
@@ -80,10 +86,10 @@ class _PreviewStream(io.RawIOBase):
         super().close()
 
 
-def _read_video_thumbnail(stream, size: int, *, cheap_seeks: bool = False) -> QImage:
+def _read_video_thumbnail(stream, size: int, *, cheap_seeks: bool = False, cancelled=None) -> QImage:
     import av
 
-    with _PreviewStream(stream, size, cheap_seeks=cheap_seeks) as reader:
+    with _PreviewStream(stream, size, cheap_seeks=cheap_seeks, cancelled=cancelled) as reader:
         with av.open(reader, mode="r", options={
             "probesize": "1048576", "analyzeduration": "1000000",
             "protocol_whitelist": "pipe",
@@ -94,6 +100,8 @@ def _read_video_thumbnail(stream, size: int, *, cheap_seeks: bool = False) -> QI
             if video.codec_context.width * video.codec_context.height > _MAX_PIXELS:
                 return QImage()
             for frame in container.decode(video):
+                if cancelled is not None and cancelled():
+                    return QImage()
                 if frame.width * frame.height > _MAX_PIXELS:
                     return QImage()
                 ratio = min(_SIZE / frame.width, _SIZE / frame.height, 1)
@@ -105,17 +113,20 @@ def _read_video_thumbnail(stream, size: int, *, cheap_seeks: bool = False) -> QI
     return QImage()
 
 
-def _read_thumbnail(node: VFSNode, vfs: VFS) -> QImage:
+def _read_thumbnail(node: VFSNode, vfs: VFS, *, cancelled=None) -> QImage:
     """Reduce one image/video without exporting it or creating a temp file."""
-    if node.is_dir or node.size <= 0:
+    cancelled = cancelled or (lambda: False)
+    if node.is_dir or node.size <= 0 or cancelled():
         return QImage()
     try:
-        from PIL import Image, ImageOps
+        from PIL import Image, ImageOps, UnidentifiedImageError
 
         from crush.parsers.image_parser import _looks_like_image
 
         stream = None
         with background_io():
+            if cancelled():
+                return QImage()
             source, entry = vfs.delegate(node)
             if isinstance(source, SevenZipVFS):
                 if node.size > _MAX_FILE_BYTES:
@@ -127,6 +138,8 @@ def _read_thumbnail(node: VFSNode, vfs: VFS) -> QImage:
                     stream = io.BytesIO(raw)
             else:
                 head = vfs.peek(node, 512)
+                if cancelled():
+                    return QImage()
                 if _looks_like_video(head, node):
                     if node.size > _MAX_FILE_BYTES and not isinstance(source, (DirectoryVFS, FileVFS, RawImageVFS)):
                         # Other VFS open() implementations may buffer a whole
@@ -144,13 +157,23 @@ def _read_thumbnail(node: VFSNode, vfs: VFS) -> QImage:
                     raw = vfs.read(node)
         if stream is not None:
             return _read_video_thumbnail(stream, node.size,
-                                         cheap_seeks=isinstance(source, (DirectoryVFS, FileVFS)))
+                                         cheap_seeks=isinstance(source, (DirectoryVFS, FileVFS)),
+                                         cancelled=cancelled)
+        if cancelled():
+            return QImage()
         if not _looks_like_image(raw[:512]):
             return QImage()
         if len(raw) > _MAX_FILE_BYTES:
             return QImage()
-        ensure_pil_plugins()
-        with Image.open(io.BytesIO(raw)) as image:
+        try:
+            image = Image.open(io.BytesIO(raw))
+        except UnidentifiedImageError:
+            with _PLUGIN_LOCK:
+                ensure_pil_plugins()
+            image = Image.open(io.BytesIO(raw))
+        with image:
+            if cancelled():
+                return QImage()
             if image.width * image.height > _MAX_PIXELS:
                 return QImage()
             image.draft("RGB", (_SIZE, _SIZE))
@@ -173,10 +196,21 @@ class ThumbnailPreviews(QObject):
         self.enabled = False
         self._views = views
         self._cache: OrderedDict[tuple[int, str], QImage] = OrderedDict()
+        self._icons: dict[tuple[int, str], QIcon] = {}
         self._generation = 0
-        self._busy = False
+        self._active: dict = {}
+        self._pending: OrderedDict = OrderedDict()
+        self._dispatch_timer = QTimer(self)
+        self._dispatch_timer.setSingleShot(True)
+        self._dispatch_timer.timeout.connect(self._start_pending)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(16)
+        self._refresh_timer.timeout.connect(self._update_views)
         self._ready.connect(self._on_ready)
         for view in views:
+            view.verticalScrollBar().valueChanged.connect(self._schedule_dispatch)
+            view.horizontalScrollBar().valueChanged.connect(self._schedule_dispatch)
             delegate = _ThumbnailDelegate(self, node_role, vfs_role, view)
             if isinstance(view, QTreeView):
                 view.setItemDelegateForColumn(0, delegate)
@@ -191,42 +225,86 @@ class ThumbnailPreviews(QObject):
 
     def clear(self) -> None:
         self._generation += 1
+        for cancel, _, _ in self._active.values():
+            cancel.set()
+        self._pending.clear()
+        self._dispatch_timer.stop()
+        self._refresh_timer.stop()
         self._cache.clear()
+        self._icons.clear()
         self._update_views()
+
+    @property
+    def _busy(self) -> bool:
+        return bool(self._active)
 
     def _update_views(self) -> None:
         for view in self._views:
-            view.viewport().update()
+            if view.isVisible():
+                view.viewport().update()
 
-    def icon(self, node: VFSNode, vfs: VFS, *, request: bool = True) -> QIcon:
+    def icon(self, node: VFSNode, vfs: VFS, *, request: bool = True, view=None, index=None) -> QIcon:
         if not self.enabled or node.is_dir:
             return QIcon()
         key = (id(vfs), node.path)
         if key in self._cache:
             image = self._cache.pop(key)
             self._cache[key] = image
-            return QIcon() if image.isNull() else QIcon(QPixmap.fromImage(image))
-        if request and not self._busy:
-            self._busy = True
-            generation = self._generation
+            return self._icons[key]
+        if request and (self._generation, key) not in self._active:
+            self._pending[key] = (node, vfs, view, QPersistentModelIndex(index) if index is not None else None)
+            while len(self._pending) > _MAX_PENDING:
+                self._pending.popitem(last=False)
+            self._schedule_dispatch()
+        return QIcon()
 
-            def load() -> None:
-                image = _read_thumbnail(node, vfs)
+    def _schedule_dispatch(self) -> None:
+        if not self._dispatch_timer.isActive():
+            self._dispatch_timer.start(0)
+
+    @staticmethod
+    def _visible(view, index) -> bool:
+        if view is None:
+            return True
+        try:
+            return (index.isValid() and view.isVisible() and view.model() is index.model()
+                    and (not isinstance(view, QListView) or index.parent() == view.rootIndex())
+                    and view.visualRect(index).intersects(view.viewport().rect()))
+        except RuntimeError:
+            return False  # The Qt view was destroyed.
+
+    def _start_pending(self) -> None:
+        for cancel, view, index in self._active.values():
+            if not self._visible(view, index):
+                cancel.set()
+        while self.enabled and self._pending and len(self._active) < _WORKERS:
+            key, (node, vfs, view, index) = self._pending.popitem(last=False)
+            if not self._visible(view, index):
+                continue  # Scrolled away, switched folder/view, or closed source.
+            generation = self._generation
+            cancel = threading.Event()
+            self._active[generation, key] = (cancel, view, index)
+
+            def load(node=node, vfs=vfs, key=key, generation=generation, cancel=cancel) -> None:
+                image = _read_thumbnail(node, vfs, cancelled=cancel.is_set)
                 try:
                     self._ready.emit(key, generation, image)
                 except RuntimeError:
                     pass  # The owning panel was destroyed while reading.
 
             threading.Thread(target=load, daemon=True).start()
-        return QIcon()
 
     def _on_ready(self, key: tuple[int, str], generation: int, image: QImage) -> None:
-        self._busy = False
-        if self.enabled and generation == self._generation:
+        job = self._active.pop((generation, key), None)
+        if self.enabled and generation == self._generation and job is not None and not job[0].is_set():
             self._cache[key] = image
+            self._icons[key] = QIcon() if image.isNull() else QIcon(QPixmap.fromImage(image))
             while len(self._cache) > _CACHE_ENTRIES:
-                self._cache.popitem(last=False)
-        self._update_views()
+                old_key, _ = self._cache.popitem(last=False)
+                self._icons.pop(old_key, None)
+        if self.enabled and not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+        self._start_pending()
 
 
 class _ThumbnailDelegate(QStyledItemDelegate):
@@ -243,6 +321,16 @@ class _ThumbnailDelegate(QStyledItemDelegate):
         super().initStyleOption(option, index)
         if self._grid:
             node = index.data(self._node_role)
+            width = self._view.gridSize().width() - 12
+            stem, dot, extension = option.text.rpartition(".")
+            suffix = dot + extension if stem and dot and node is not None and not node.is_dir else ""
+            if suffix:
+                option.text = option.fontMetrics.elidedText(stem, Qt.TextElideMode.ElideMiddle,
+                                                           max(0, width - option.fontMetrics.horizontalAdvance(suffix))) + suffix
+            else:
+                option.text = option.fontMetrics.elidedText(option.text, Qt.TextElideMode.ElideMiddle, width)
+            option.textElideMode = Qt.TextElideMode.ElideMiddle
+            option.features &= ~QStyleOptionViewItem.ViewItemFeature.WrapText
             kind = QStyle.StandardPixmap.SP_DirIcon if node is not None and node.is_dir else QStyle.StandardPixmap.SP_FileIcon
             option.icon = self._view.style().standardIcon(kind)
             option.decorationSize = QSize(128, 128)
@@ -260,7 +348,7 @@ class _ThumbnailDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index) -> None:
         node, vfs = index.data(self._node_role), index.data(self._vfs_role)
         if node is not None and vfs is not None:
-            self._previews.icon(node, vfs)
+            self._previews.icon(node, vfs, view=self._view, index=index)
         super().paint(painter, option, index)
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802

@@ -6,7 +6,7 @@ from __future__ import annotations
 import io
 import os
 
-from PySide6.QtCore import QBuffer, QIODeviceBase, Qt, QTimer, QUrl
+from PySide6.QtCore import QBuffer, QEvent, QIODeviceBase, Qt, QTimer, QUrl
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtMultimedia import (
     QAudio,
@@ -16,8 +16,12 @@ from PySide6.QtMultimedia import (
     QMediaDevices,
     QMediaPlayer,
 )
-from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QFrame,
+    QGraphicsScene,
+    QGraphicsView,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -92,14 +96,24 @@ class MediaViewer(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         # Video surface (hidden for audio-only PCM playback)
-        self._video_widget = QVideoWidget()
+        self._video_widget = QGraphicsView()
+        self._video_widget.setFrameShape(QFrame.Shape.NoFrame)
+        self._video_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._video_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._video_widget.setBackgroundBrush(Qt.GlobalColor.black)
+        scene = QGraphicsScene(self._video_widget)
+        self._video_item = QGraphicsVideoItem()
+        scene.addItem(self._video_item)
+        self._video_widget.setScene(scene)
+        self._video_widget.viewport().installEventFilter(self)
+        self._video_item.nativeSizeChanged.connect(self._fit_video)
         layout.addWidget(self._video_widget, stretch=1)
 
         # Qt player (used for video and non-OGG audio)
         self._player = QMediaPlayer(self)
         self._audio = QAudioOutput(self)
         self._player.setAudioOutput(self._audio)
-        self._player.setVideoOutput(self._video_widget)
+        self._player.setVideoOutput(self._video_item)
         self._audio.setVolume(0.8)
 
         # Controls
@@ -113,6 +127,22 @@ class MediaViewer(QWidget):
         self._play_btn.setFixedWidth(60)
         self._play_btn.clicked.connect(self._toggle_play)
         ctrl_layout.addWidget(self._play_btn)
+
+        self._loop_checkbox = QCheckBox(translate("MediaViewer", "Loop"))
+        self._loop_checkbox.toggled.connect(self._set_loop)
+        ctrl_layout.addWidget(self._loop_checkbox)
+
+        self._rotate_left_btn = QPushButton("↶")
+        self._rotate_left_btn.setFixedWidth(28)
+        self._rotate_left_btn.setToolTip(translate("MediaViewer", "Rotate left 90°"))
+        self._rotate_left_btn.clicked.connect(lambda: self._rotate(-90))
+        ctrl_layout.addWidget(self._rotate_left_btn)
+
+        self._rotate_right_btn = QPushButton("↷")
+        self._rotate_right_btn.setFixedWidth(28)
+        self._rotate_right_btn.setToolTip(translate("MediaViewer", "Rotate right 90°"))
+        self._rotate_right_btn.clicked.connect(lambda: self._rotate(90))
+        ctrl_layout.addWidget(self._rotate_right_btn)
 
         self._position_slider = QSlider(Qt.Orientation.Horizontal)
         self._position_slider.setRange(0, 0)
@@ -157,6 +187,9 @@ class MediaViewer(QWidget):
     def _start_pcm(self, pcm: bytes, rate: int, channels: int) -> None:
         self._using_pcm = True
         self._video_widget.hide()
+        self._loop_checkbox.hide()
+        self._rotate_left_btn.hide()
+        self._rotate_right_btn.hide()
         bpm = rate * channels * 2 // 1000  # bytes per millisecond (s16)
         self._pcm_bpm = bpm if bpm > 0 else 1
         self._pcm_duration_ms = len(pcm) // self._pcm_bpm
@@ -181,6 +214,31 @@ class MediaViewer(QWidget):
     # ------------------------------------------------------------------ #
     # Controls                                                             #
     # ------------------------------------------------------------------ #
+
+    def _set_loop(self, enabled: bool) -> None:
+        self._player.setLoops(QMediaPlayer.Loops.Infinite if enabled else QMediaPlayer.Loops.Once)
+        if not enabled and self._player.isSeekable():
+            # Flush future iterations already buffered by Qt's FFmpeg backend.
+            self._player.setPosition(self._player.position())
+
+    def _rotate(self, degrees: int) -> None:
+        self._video_item.setRotation((self._video_item.rotation() + degrees) % 360)
+        self._fit_video()
+
+    def _fit_video(self) -> None:
+        size = self._video_item.nativeSize()
+        if size.isEmpty():
+            return
+        self._video_item.setSize(size)
+        self._video_item.setTransformOriginPoint(self._video_item.boundingRect().center())
+        bounds = self._video_item.sceneBoundingRect()
+        self._video_widget.setSceneRect(bounds)
+        self._video_widget.fitInView(bounds, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def eventFilter(self, obj: object, event: QEvent) -> bool:  # type: ignore[override]
+        if obj is self._video_widget.viewport() and event.type() == QEvent.Type.Resize:
+            self._fit_video()
+        return super().eventFilter(obj, event)
 
     def _toggle_play(self) -> None:
         if self._using_pcm:

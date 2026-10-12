@@ -17,12 +17,16 @@ The Filesystem panel's **Tree / Grid** selector switches between the hierarchy
 and a folder browser. Grid displays one directory as large tiles. Double-click a
 folder to enter it, use **Up** to return to its parent, and double-click a file to
 open it. The view choice is remembered. Filtering also works in Grid; clearing
-the filter returns to the current directory.
+the filter returns to the current directory. Long file names are shortened in
+the middle while keeping the extension visible.
 
 **View → Show thumbnails** adds image and video previews in either view and in
 search results. It is off by default and remembers your choice. Only visible
 items are decoded, in the background, with a bounded memory cache; no thumbnail
 files are saved. Closing a source or disabling previews clears the cache.
+Loading uses up to four workers, skips queued items that scroll out of view,
+and stops obsolete work between reads and decoding steps. Results share cached
+GUI icons and batched repaints so a slow file does not hold up the whole folder.
 Unsupported or damaged files keep their normal presentation. Image previews
 skip files larger than 32 MiB and images above 40 megapixels. Video previews read
 a frame through the source stream with an I/O limit. Videos above 32 MiB use
