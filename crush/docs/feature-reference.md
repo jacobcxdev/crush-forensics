@@ -241,13 +241,29 @@ Opening the ZIP on its own works as before: nothing is read from a `.ufd` beside
 
 All panels are dockable and can be floated, resized, or hidden via **View** menu. Use **View → Reset Panel Layout** to restore defaults.
 
-**View → Show image thumbnails** adds image previews beside filenames in the
-Filesystem tree and its search results. It is off by default and remembers your
-choice. Only visible rows are decoded, in the background, with a bounded memory
-cache; no thumbnail files are saved. Closing a source or disabling previews clears
-the cache. Unsupported or damaged images keep their normal row presentation.
-Automatic previews skip files larger than 32 MiB and images above 40 megapixels;
-you can still open those files in the image viewer.
+The Filesystem panel's **Tree / Grid** selector switches between the hierarchy
+and a folder browser. Grid displays one directory as large tiles. Double-click a
+folder to enter it, use **Up** to return to its parent, and double-click a file to
+open it. The view choice is remembered. Filtering also works in Grid; clearing
+the filter returns to the current directory.
+
+**View → Show thumbnails** adds image and video previews in either view and in
+search results. It is off by default and remembers your choice. Only visible
+items are decoded, in the background, with a bounded memory cache; no thumbnail
+files are saved. Closing a source or disabling previews clears the cache.
+Unsupported or damaged files keep their normal presentation. Image previews
+skip files larger than 32 MiB and images above 40 megapixels. Video previews read
+a frame through the source stream with an I/O limit. Videos above 32 MiB use
+streaming previews for disk images and regular files; other sources retain a
+generic icon to avoid buffering or disk staging. These preview limits do not
+prevent opening the file normally.
+
+**Tools → Clear saved data…** clears recent file and disk-image paths, search
+history, automatic diagnostic logs in the system temporary folder, and thumbnail
+caches in open Crush windows. The dialog offers an optional preferences reset,
+which is unchecked by default and finishes taking effect after restarting Crush.
+Logging resumes in a fresh log. Cleanup reports any files or settings it could
+not clear. It does not delete source files or disk images.
 
 ---
 

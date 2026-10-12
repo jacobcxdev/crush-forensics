@@ -74,6 +74,17 @@ def test_plain_asif_detected_by_content(asif_images: dict[str, Path]) -> None:
     assert container_format(asif_images["plain"]) == "ASIF"
 
 
+def test_asif_preview_stream_does_not_buffer_small_files(asif_images, monkeypatch):
+    vfs = open_vfs(asif_images["plain"], as_disk_image=True)
+    try:
+        hello = next(n for n in _files(vfs.root()) if n.name == "hello.txt")
+        monkeypatch.setattr(vfs, "read", lambda node: pytest.fail("buffered entire preview input"))
+        with vfs.open(hello, streaming=True) as stream:
+            assert stream.read(4) == CONTENT[:4]
+    finally:
+        vfs.close()
+
+
 def test_encrypted_asif_zero_length_payload_and_profile(asif_images: dict[str, Path]) -> None:
     # The public generator writes Apple's ASIF encryption profile: a zero
     # declared payload size means the encrypted payload runs to EOF.

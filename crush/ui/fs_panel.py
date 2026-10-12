@@ -11,15 +11,20 @@ import threading
 import time
 from typing import overload
 
-from PySide6.QtCore import QModelIndex, QSettings, QStringListModel, Qt, Signal, QSortFilterProxyModel, QTimer
+from PySide6.QtCore import QModelIndex, QPersistentModelIndex, QSettings, QSize, QStringListModel, Qt, Signal, QSortFilterProxyModel, QTimer
 from PySide6.QtGui import QGuiApplication, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCompleter,
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
     QLineEdit,
+    QListView,
     QMenu,
     QStackedWidget,
     QTreeView,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -185,10 +190,12 @@ class FilesystemPanel(QWidget):
         self._type_pending_timer.setInterval(1000)
         self._type_pending_timer.timeout.connect(self._retry_pending_types)
         self._activities: set[str] = set()
+        self.view_mode = "tree"
+        self._grid_folder = QPersistentModelIndex()
         self.background_status.emit("")
         self._build_ui()
         self._thumbnails = ThumbnailPreviews(
-            (self._tree, self._search_view), _ROLE_NODE, _ROLE_VFS, self,
+            (self._tree, self._search_view, self._grid), _ROLE_NODE, _ROLE_VFS, self,
         )
 
     def closeEvent(self, event) -> None:  # noqa: N802
@@ -216,6 +223,12 @@ class FilesystemPanel(QWidget):
         _completer.activated.connect(self._on_filter_return)
         self._filter.setCompleter(_completer)
         layout.addWidget(self._filter)
+
+        self._view_mode = QComboBox()
+        self._view_mode.addItem(translate("FilesystemPanel", "Tree"), "tree")  # i18n: keep -- internal mode identifier
+        self._view_mode.addItem(translate("FilesystemPanel", "Grid"), "grid")  # i18n: keep -- internal mode identifier
+        self._view_mode.setAccessibleName(translate("FilesystemPanel", "Filesystem view"))
+        layout.addWidget(self._view_mode)
 
         self._stack = QStackedWidget()
 
@@ -257,7 +270,130 @@ class FilesystemPanel(QWidget):
         self._search_view.selectionModel().selectionChanged.connect(self._on_search_selection_changed)
         self._stack.addWidget(self._search_view)
 
+        self._grid_page = QWidget()
+        grid_layout = QVBoxLayout(self._grid_page)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+        navigation = QHBoxLayout()
+        self._grid_up = QToolButton()
+        self._grid_up.setText(translate("FilesystemPanel", "Up"))
+        self._grid_up.clicked.connect(self._grid_go_up)
+        navigation.addWidget(self._grid_up)
+        self._grid_path = QLabel()
+        self._grid_path.setWordWrap(True)
+        navigation.addWidget(self._grid_path, 1)
+        grid_layout.addLayout(navigation)
+        self._grid = QListView()
+        self._grid.setViewMode(QListView.ViewMode.IconMode)
+        self._grid.setResizeMode(QListView.ResizeMode.Adjust)
+        self._grid.setMovement(QListView.Movement.Static)
+        self._grid.setIconSize(QSize(128, 128))
+        self._grid.setGridSize(QSize(160, 180))
+        self._grid.setUniformItemSizes(True)
+        self._grid.setWordWrap(True)
+        self._grid.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._grid.setModel(self._proxy)
+        self._grid.selectionModel().selectionChanged.connect(self._on_grid_selection_changed)
+        self._grid.doubleClicked.connect(self._on_grid_activated)
+        self._grid.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._grid.customContextMenuRequested.connect(self._on_grid_context_menu)
+        grid_layout.addWidget(self._grid)
+        self._stack.addWidget(self._grid_page)
+
         layout.addWidget(self._stack)
+        self._view_mode.currentIndexChanged.connect(
+            lambda: self.set_view_mode(self._view_mode.currentData())
+        )
+        self.set_view_mode(self._filter_history_settings.value("filesystem_view_mode", "tree"))
+
+    def set_view_mode(self, mode: str) -> None:
+        previous = self.view_mode
+        self.view_mode = "grid" if mode == "grid" else "tree"
+        self._view_mode.setCurrentIndex(self._view_mode.findData(self.view_mode))
+        self._filter_history_settings.setValue("filesystem_view_mode", self.view_mode)
+        if self.view_mode == "grid" and (previous != "grid" or not self._grid_folder.isValid()):
+            selected = self._tree.currentIndex().siblingAtColumn(0)
+            node = selected.data(_ROLE_NODE)
+            if node is not None and not node.is_dir:
+                selected = selected.parent()
+            self._set_grid_folder(selected if selected.isValid() else self._proxy.index(0, 0))
+        elif self.view_mode == "tree" and self._grid_folder.isValid():
+            self._tree.setCurrentIndex(QModelIndex(self._grid_folder))
+            self._tree.scrollTo(QModelIndex(self._grid_folder))
+        self._show_filesystem_view()
+
+    def _show_filesystem_view(self) -> None:
+        searching = bool(self._pending_filter.strip())
+        if self.view_mode == "tree":
+            self._stack.setCurrentWidget(self._search_view if searching else self._tree)
+            return
+        model = self._search_model if searching else self._proxy
+        if self._grid.model() is not model:
+            self._grid.setModel(model)
+            self._grid.selectionModel().selectionChanged.connect(self._on_grid_selection_changed)
+        self._grid.setRootIndex(QModelIndex() if searching else QModelIndex(self._grid_folder))
+        self._grid_up.setEnabled(searching or self._grid_folder.isValid())
+        node = self._grid_folder.data(_ROLE_NODE)
+        self._grid_path.setText(
+            translate("FilesystemPanel", "Search results") if searching else
+            node.path if node else translate("FilesystemPanel", "Sources")
+        )
+        self._stack.setCurrentWidget(self._grid_page)
+
+    def _set_grid_folder(self, index: QModelIndex) -> None:
+        self._grid_folder = QPersistentModelIndex(index)
+        if index.isValid():
+            self._on_expanded(index)
+        self._show_filesystem_view()
+
+    def _grid_go_up(self) -> None:
+        if self._pending_filter.strip():
+            self._filter.clear()
+            self._pending_filter = ""
+            self._apply_filter_now()
+        else:
+            self._set_grid_folder(QModelIndex(self._grid_folder).parent())
+
+    def _on_grid_activated(self, index: QModelIndex) -> None:
+        node, vfs = index.data(_ROLE_NODE), index.data(_ROLE_VFS)
+        if node is None or vfs is None:
+            return
+        if not node.is_dir:
+            self.node_activated.emit(node, vfs)
+            return
+        if self._grid.model() is self._search_model:
+            self._navigate_to_node(node, vfs)
+            index = self._tree.currentIndex()
+            self._filter.clear()
+            self._pending_filter = ""
+            self._filter_timer.stop()
+        self._set_grid_folder(index)
+
+    def _on_grid_selection_changed(self, *_: object) -> None:
+        index = self._grid.currentIndex()
+        node, vfs = index.data(_ROLE_NODE), index.data(_ROLE_VFS)
+        if node is not None and vfs is not None:
+            self.node_selected.emit(node, vfs)
+
+    def _on_grid_context_menu(self, pos: object) -> None:
+        index = self._grid.indexAt(pos)
+        node, vfs = index.data(_ROLE_NODE), index.data(_ROLE_VFS)
+        if node is None or vfs is None:
+            return
+        selected = [(i.data(_ROLE_NODE), i.data(_ROLE_VFS))
+                    for i in self._grid.selectionModel().selectedIndexes()
+                    if i.data(_ROLE_NODE) is not None and not i.data(_ROLE_NODE).is_dir]
+        global_pos = self._grid.viewport().mapToGlobal(pos)
+        if len(selected) > 1 and self._grid.selectionModel().isSelected(index):
+            menu = QMenu(self)
+            export = menu.addAction(translate("FilesystemPanel", "Export selected files…"))
+            send = menu.addAction(translate("FilesystemPanel", "Send selected files to Peach"))
+            action = menu.exec(global_pos)
+            if action == export:
+                self.export_multi_requested.emit([(n, v, n.path) for n, v in selected], "")
+            elif action == send:
+                self.send_to_peach_batch_requested.emit(selected)
+            return
+        self._show_context_menu(node, vfs, global_pos)
 
     def load_vfs(self, vfs: VFS) -> None:
         """Replace the tree with a new VFS source."""
@@ -292,7 +428,7 @@ class FilesystemPanel(QWidget):
         row = self._node_to_row_shallow(root_node, vfs)
         self._model.appendRow(row)
         self._tree.expand(self._proxy.mapFromSource(self._model.indexFromItem(row[0])))
-        if root_node.children:
+        if root_node.children and not row[0].data(_ROLE_LOADED):
             self._add_placeholder(row[0])
 
         # Search results are of the sources replaced: gone with them, as
@@ -300,6 +436,9 @@ class FilesystemPanel(QWidget):
         self._search_gen += 1
         self._search_model.setRowCount(0)
         self._filter.clear()
+        self._grid_folder = QPersistentModelIndex()
+        if self.view_mode == "grid":
+            self._set_grid_folder(self._proxy.index(0, 0))
 
         self._start_prescan([vfs], self._prescan_gen)
         self.load_finished.emit()
@@ -315,7 +454,7 @@ class FilesystemPanel(QWidget):
         self._model.appendRow(row)
         self._proxy.invalidateFilter()
         self._tree.expand(self._proxy.mapFromSource(self._model.indexFromItem(row[0])))
-        if root_node.children:
+        if root_node.children and not row[0].data(_ROLE_LOADED):
             self._add_placeholder(row[0])
         self._prescan_gen += 1
         # A new scan cancels the running one, which may not have finished an
@@ -359,12 +498,15 @@ class FilesystemPanel(QWidget):
             row = self._node_to_row_shallow(root_node, source)
             self._model.appendRow(row)
             self._tree.expand(self._proxy.mapFromSource(self._model.indexFromItem(row[0])))
-            if root_node.children:
+            if root_node.children and not row[0].data(_ROLE_LOADED):
                 self._add_placeholder(row[0])
 
         self._search_gen += 1
         self._search_model.setRowCount(0)
         self._filter.clear()
+        self._grid_folder = QPersistentModelIndex()
+        if self.view_mode == "grid":
+            self._set_grid_folder(self._proxy.index(0, 0))
 
         if self._vfs_list:
             self._start_prescan(list(self._vfs_list), self._prescan_gen)
@@ -778,7 +920,6 @@ class FilesystemPanel(QWidget):
     def _apply_filter_now(self) -> None:
         text = self._pending_filter.strip()
         if not text:
-            self._stack.setCurrentIndex(0)
             self._proxy.setFilterFixedString("")
             if self._navigate_after_filter:
                 node, vfs = self._navigate_after_filter
@@ -786,7 +927,7 @@ class FilesystemPanel(QWidget):
                 self._navigate_to_node(node, vfs)
         else:
             self._populate_search_results(text)
-            self._stack.setCurrentIndex(1)
+        self._show_filesystem_view()
 
     def _parse_filter_text(self, text: str) -> dict[str, str]:
         """Parse filter tokens into a dict.  A leading '-' marks negation.
@@ -965,6 +1106,8 @@ class FilesystemPanel(QWidget):
         self._tree.scrollTo(idx)
         self._tree.setCurrentIndex(idx)
         self._tree.expand(idx)
+        if self.view_mode == "grid":
+            self._set_grid_folder(idx if node.is_dir else idx.parent())
 
     def _build_node_path(self, target: VFSNode, vfs: VFS) -> list[VFSNode]:
         """Return nodes from root to target (inclusive), or [] if not found."""

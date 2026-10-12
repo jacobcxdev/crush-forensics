@@ -2275,7 +2275,7 @@ class RawImageVFS(VFS):
                 return read_raw_region(self._handle.image, entry.base, entry.size)
             return read_walker_file(entry.walker, entry.node, entry.size)
 
-    def open(self, node: VFSNode) -> IO[bytes]:
+    def open(self, node: VFSNode, *, streaming: bool = False) -> IO[bytes]:
         from crush.core.raw_image import (
             stream_deleted_file,
             stream_raw_region,
@@ -2283,7 +2283,9 @@ class RawImageVFS(VFS):
         )
 
         entry = self._resolve_entry(node)
-        if entry.size <= STREAM_THRESHOLD:
+        if entry.stored is not None:
+            return BytesIO(entry.stored)
+        if not streaming and entry.size <= STREAM_THRESHOLD:
             return BytesIO(self.read(node))
 
         def make_iter() -> Iterator[bytes]:

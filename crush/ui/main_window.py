@@ -3,7 +3,7 @@
 """Crush main window — QMainWindow with dockable panels."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import time
 import fnmatch
 import os
@@ -211,6 +211,14 @@ class _LogSignalHandler(QObject, logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         msg = self.format(record)
         self.log_line.emit(msg)
+
+
+class _DiagnosticFileHandler(logging.FileHandler):
+    def emit(self, record: logging.LogRecord) -> None:
+        # A worker can still hold a removed handler while cleanup closes it.
+        # FileHandler's append mode otherwise reopens the deleted old log.
+        if not self._closed:
+            super().emit(record)
 
 
 class _DockTitleBar(QWidget):
@@ -918,7 +926,7 @@ class MainWindow(QMainWindow):
         self._always_hex_action.toggled.connect(self._set_always_hex)
         view_menu.addAction(self._always_hex_action)
         self._thumbnails_action = QAction(
-            translate("MainWindow", "Show image thumbnails"), self, checkable=True,
+            translate("MainWindow", "Show thumbnails"), self, checkable=True,
         )
         thumbnails = self._settings.value("image_thumbnails", False, type=bool)
         self._thumbnails_action.setChecked(thumbnails)
@@ -951,6 +959,9 @@ class MainWindow(QMainWindow):
         )
         tools_menu.addSeparator()
         tools_menu.addAction(translate("MainWindow", "Export log…"), self._export_log)
+        tools_menu.addAction(
+            translate("MainWindow", "Clear saved data…"), self._clear_saved_data
+        )
         tools_menu.addSeparator()
         self._integrity_mode_action = QAction(
             translate("MainWindow", "Integrity Mode"), self, checkable=True
@@ -4339,12 +4350,13 @@ class MainWindow(QMainWindow):
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         return Path(tempfile.gettempdir()) / f"crush-{ts}.log"
 
-    def _set_log_path(self, path: Path) -> None:
+    def _set_log_path(self, path: Path, *, mode: str = "a") -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        handler = _DiagnosticFileHandler(path, mode=mode, encoding="utf-8")
         if self._file_handler:
             self._raw_logger.removeHandler(self._file_handler)
             self._file_handler.close()
-        self._file_handler = logging.FileHandler(path, encoding="utf-8")
+        self._file_handler = handler
         self._file_handler.setLevel(getattr(self, "_log_level", logging.INFO))
         self._file_handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)s %(message)s")
@@ -4868,7 +4880,96 @@ class MainWindow(QMainWindow):
     def _clear_recent_files(self) -> None:
         self._settings.setValue("recent_files", [])
         self._settings.setValue("recent_disk_images", [])
-        self._rebuild_recent_menu()
+        for window in self._open_windows:
+            if isValid(window):
+                window._rebuild_recent_menu()
+                window._rebuild_welcome_recent()
+
+    def _clear_saved_data(self) -> None:
+        from crush.ui.clear_saved_data import ClearSavedDataDialog
+
+        dialog = ClearSavedDataDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        reset = dialog.reset_preferences.isChecked()
+        errors = self._clear_saved_data_now(reset_preferences=reset)
+        restart_notice = "\n\n" + translate(
+            "MainWindow", "Restart Crush to finish applying the default preferences."
+        ) if reset else ""
+        if errors:
+            message = translate(
+                "MainWindow", "Some saved data could not be cleared:"
+            ) + "\n\n" + "\n".join(errors) + restart_notice
+            QMessageBox.warning(self, translate("MainWindow", "Clear saved data"), message)
+        else:
+            message = translate(
+                "MainWindow", "Saved data cleared. Logging continues in a new log."
+            ) + restart_notice
+            QMessageBox.information(self, translate("MainWindow", "Clear saved data"), message)
+
+    def _clear_saved_data_now(self, *, reset_preferences: bool = False) -> list[str]:
+        from crush.ui.clear_saved_data import clear_diagnostic_logs
+
+        windows = [window for window in self._open_windows if isValid(window)]
+        errors: list[str] = []
+        if reset_preferences:
+            self._settings.clear()
+        else:
+            for key in ("recent_files", "recent_disk_images", "filter_history"):
+                self._settings.remove(key)
+        self._settings.sync()
+        if self._settings.status() != self._settings.Status.NoError:
+            errors.append(translate("MainWindow", "Could not save the cleared settings."))
+
+        previous_paths = {window._log_path for window in windows}
+        for window in windows:
+            window._settings.sync()
+            window._rebuild_recent_menu()
+            window._rebuild_welcome_recent()
+            panel = window._fs_panel
+            panel._filter_history_settings.sync()
+            panel._filter_history_model.setStringList([])
+            panel._thumbnails.clear()
+            if reset_preferences:
+                window._thumbnails_action.blockSignals(True)
+                window._thumbnails_action.setChecked(False)
+                window._thumbnails_action.blockSignals(False)
+                panel._thumbnails.set_enabled(False)
+            window._log_view.clear()
+            handler = window._file_handler
+            if handler is not None:
+                window._raw_logger.removeHandler(handler)
+                handler.acquire()
+                try:
+                    handler.close()
+                except OSError as exc:
+                    errors.append(f"{window._log_path}: {exc}")
+                finally:
+                    handler.release()
+                    window._file_handler = None
+
+        errors.extend(clear_diagnostic_logs(Path(tempfile.gettempdir())))
+        # Exclusive creation avoids truncating or appending to another
+        # instance's log, including one that started during this cleanup.
+        for window in windows:
+            now = datetime.now(timezone.utc)
+            for offset in range(60):
+                ts = (now + timedelta(seconds=offset)).strftime("%Y%m%d-%H%M%S")
+                path = Path(tempfile.gettempdir()) / f"crush-{ts}.log"
+                if path in previous_paths:
+                    continue
+                try:
+                    window._set_log_path(path, mode="x")
+                except FileExistsError:
+                    continue
+                except OSError as exc:
+                    errors.append(f"{path}: {exc}")
+                    break
+                window._logger.info("Saved-data cleanup completed; logging resumed")
+                break
+            else:
+                errors.append(translate("MainWindow", "Could not create a new diagnostic log."))
+        return errors
 
     def _set_prescan_workers(self) -> None:
         import os as _os
