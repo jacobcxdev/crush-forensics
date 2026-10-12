@@ -41,6 +41,8 @@ dependencies = [
     # ewfprobe decrypts Apple disk images, AD-encrypted sets and encrypted
     # AFF, and reads private keys, with it (as Cryptodome).
     "pycryptodomex>=3.20",
+    # ASIF images, including encrcdsa v2 encrypted images, read in memory.
+    "fs-explorer==0.5.0",
     "crush-analyze @ git+https://github.com/kalink0/crush-analyze.git@645cb2a414c172ad0710b7eb571dde27543f5278",
     "pyzipper>=0.3.6",
     "sqlcipher3>=0.6.2",

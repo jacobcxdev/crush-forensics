@@ -3071,7 +3071,7 @@ def _tar_suffix(p: Path) -> str:
 # counts too.
 DISK_IMAGE_SUFFIXES = (
     ".img", ".dd", ".raw", ".e01", ".s01", ".ex01", ".aff", ".aff4",
-    ".dmg", ".dmgpart", ".sparseimage", ".vhd", ".vhdx", ".vmdk", ".qcow", ".qcow2",
+    ".dmg", ".dmgpart", ".sparseimage", ".asif", ".vhd", ".vhdx", ".vmdk", ".qcow", ".qcow2",
     ".nand", ".ubi", ".ubifs", ".squashfs", ".sqsh", ".jffs2", ".yaffs2",
 )
 

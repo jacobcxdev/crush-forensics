@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 # sys.path fallback cannot find a sibling file — mirrors how iLEAPP/ALEAPP
 # wire the same two vendored libraries together.
 from crush.core.issues import ParseIssue
+from crush.core.asif_image import open_asif
 from crush.core.stored_times import fat_stored_times
 from crush.third_party.ewfprobe import ewfprobe as _ewfprobe
 
@@ -50,6 +51,7 @@ _MAX_DEPTH = 64  # a directory this deep in a walk is a loop, not a directory
 # ZIP comment are not in the first bytes, and a file on disk is asked about
 # through container_format() instead.
 CONTAINER_HEAD_SIGNATURES: tuple[bytes, ...] = (
+    b"shdw",  # ASIF (Apple Sparse Image Format)
     qnxprobe.EWF_SIGNATURE,
     qnxprobe.EWF2_SIGNATURE,
     qnxprobe.AFF_SIGNATURE,
@@ -88,6 +90,7 @@ _CONTAINER_LABELS = {
     "AFF4": "AFF4",
     "UDIF": "Apple disk image",
     "SPARSEIMAGE": "Apple sparse image",
+    "ASIF": "Apple sparse image (ASIF)",
     "SPARSEBUNDLE": "Apple sparse bundle",
     "DMG_ENCRYPTED": "encrypted Apple disk image",
     "AD_ENCRYPTED": "FTK Imager AD-encrypted",
@@ -230,10 +233,16 @@ def open_raw_image(path: Path, *, password: str = "", private_key: str = "") -> 
             f"{path.name} is part of the Apple sparse bundle {bundle.name} (a folder "
             "whose band files together hold the disk); open the bundle itself"
         )
+    asif_note = ""
     try:
-        image = qnxprobe.open_image(  # type: ignore[no-untyped-call]
-            str(path), password=password or None, private_key=private_key or None,
-        )
+        asif = open_asif(path, password=password)
+        if asif is not None:
+            image, asif_note = asif
+            kind = "ASIF"
+        else:
+            image = qnxprobe.open_image(  # type: ignore[no-untyped-call]
+                str(path), password=password or None, private_key=private_key or None,
+            )
     except qnxprobe.ImagePasswordError as exc:
         by_key = exc.needs == "private key"
         # A password or key was given and doesn't open it (a key for a set
@@ -302,7 +311,9 @@ def open_raw_image(path: Path, *, password: str = "", private_key: str = "") -> 
     # parents) and what opened an encrypted container, in the reader's words:
     # a differencing disk's files come partly from its parent, which the
     # analyst has to know to say where a file is stored.
-    container = qnxprobe.describe_acquisition(image) if kind else ""  # type: ignore[no-untyped-call]
+    container = asif_note or (
+        qnxprobe.describe_acquisition(image) if kind else ""  # type: ignore[no-untyped-call]
+    )
     return RawImageHandle(
         path=path, image=image, size=size, volumes=vols, acquisition=acquisition,
         container=container,
@@ -329,6 +340,10 @@ def container_format(path: Path) -> str | None:
     for hints and notes: a file the recognition itself fails on is not
     named, and opening it is never stopped by that."""
     try:
+        if path.is_file():
+            with path.open("rb") as stream:
+                if stream.read(4) == b"shdw":
+                    return "ASIF"
         return qnxprobe.acquisition_format(str(path))  # type: ignore[no-untyped-call,no-any-return]
     except Exception:
         return None

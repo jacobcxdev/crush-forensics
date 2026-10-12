@@ -4,7 +4,7 @@
 
 - **raw disk images** — a whole disk, a single partition/filesystem dump or a flash dump, or a numbered `.001` segment of a split set;
 - **forensic acquisitions** — EWF (Expert Witness Format, `.E01` + segments), SMART (`.s01`), EWF2 (`.Ex01`, EnCase 7), AFF (`.aff`, or an AFD: a `.afd` folder of `.aff` files) and AFF4 (`.aff4`);
-- **Apple disk images** — UDIF (`.dmg`, also split into `.dmgpart` segments), sparse images (`.sparseimage`) and sparse bundles (a `.sparsebundle` folder);
+- **Apple disk images** — UDIF (`.dmg`, also split into `.dmgpart` segments), Apple Sparse Image Format (ASIF, `.asif`), legacy sparse images (`.sparseimage`) and sparse bundles (a `.sparsebundle` folder);
 - **virtual machine disks** — VHD, VHDX, VMDK and QCOW (versions 1 to 3), including a differencing disk, delta or overlay, read over its parent.
 
 Only the bytes an examiner actually opens ever leave the image. A disk image found inside a folder, archive or another image opens the same way via right-click → **Open Disk Image in New Window**.
@@ -24,6 +24,16 @@ Once opened as a disk image, what it holds is recognised by its content — an M
 The root of an opened container says what the disk is read from, in the reader's words: the container, how many files were joined (first .. last), the parent a differencing disk, delta or overlay is read over, and what opened an encrypted one — e.g. *Read as a VHD virtual disk of one file, over its parent dynamic.vhd*. A differencing disk's files can come from its parent; the note is what tells which files the disk was read from.
 
 ### Encrypted containers
+
+ASIF images use [fs-explorer](https://pypi.org/project/fs-explorer/) to expose the
+virtual disk to the existing filesystem reader. This includes password-encrypted
+ASIF images with an `encrcdsa` version 2 AES-128 or AES-256 wrapper. Data is
+decrypted on demand into a bounded memory cache; opening an image does not create
+a decrypted copy on disk. ASIF is detected by content, so a filename extension
+is optional. The same **Open Disk Image…** action and password dialog apply.
+This adds container support; the limitation below for separately encrypted APFS
+volumes still applies. ASIF contains no stored whole-disk hash to compare during
+verification.
 
 An encrypted Apple disk image (`hdiutil -encryption`, AES-128 or AES-256), an E01, SMART or raw (dd) set FTK Imager encrypted with AD encryption, and an AFF encrypted with AFFLIB open with their password. When the container is sealed to a certificate instead (or as well), it opens with that certificate's private key: an unencrypted RSA key file, PEM or DER. Crush asks for one when opening, with the reader's reason (e.g. *opens only with its password or its private key*); a container sealed only to a certificate is asked for the key file alone. A password or key that doesn't open it is refused with the reason and asked for again; a key file that can't be read as a key is asked for again too. The root note says what opened it. Reading these needs the pycryptodomex package, which Crush installs; without it the reader refuses with that reason.
 
