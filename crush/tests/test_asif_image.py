@@ -139,7 +139,7 @@ def test_asif_gui_retries_password_and_opens_file(
         window._load_source(str(asif_images["encrypted"]), as_disk_image=True,
                             open_after_load=True, append_to_tree=True)
         qtbot.waitUntil(lambda: bool(window.session.sources), timeout=10_000)
-        qtbot.waitUntil(lambda: window._tree_loaded, timeout=10_000)
+        qtbot.waitUntil(lambda: getattr(window, "_tree_loaded", False), timeout=10_000)
         assert attempts == ["Encrypted Disk Image", "Incorrect Password or Key"]
         vfs = window.session.sources[0]
         assert isinstance(vfs, RawImageVFS)

@@ -1950,6 +1950,19 @@ class SevenZipVFS(VFS):
         staged = self._staged
         return staged[1] if staged is not None and staged[0] == vpath else None
 
+    def read_uncached(self, node: VFSNode) -> bytes:
+        """Read for a bounded preview without retaining another original image."""
+        if node.path not in self._entry_names:
+            raise FileNotFoundError(f"Not in 7z: {node.path}")
+        cached = self._read_cache.get(node.path)
+        if cached is not None:
+            return cached
+        spool = self._staged_spool(node.path)
+        if spool is not None:
+            return spool.pread(0, spool.size)
+        with self._foreground_hold():
+            return self._extract_bytes([node.path])[node.path]
+
     def read(self, node: VFSNode) -> bytes:
         if node.path not in self._entry_names:
             raise FileNotFoundError(f"Not in 7z: {node.path}")

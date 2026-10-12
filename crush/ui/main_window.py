@@ -917,6 +917,17 @@ class MainWindow(QMainWindow):
         )
         self._always_hex_action.toggled.connect(self._set_always_hex)
         view_menu.addAction(self._always_hex_action)
+        self._thumbnails_action = QAction(
+            translate("MainWindow", "Show image thumbnails"), self, checkable=True,
+        )
+        thumbnails = self._settings.value("image_thumbnails", False, type=bool)
+        self._thumbnails_action.setChecked(thumbnails)
+        self._fs_panel._thumbnails.set_enabled(thumbnails)
+        self._thumbnails_action.toggled.connect(self._fs_panel._thumbnails.set_enabled)
+        self._thumbnails_action.toggled.connect(
+            lambda enabled: self._settings.setValue("image_thumbnails", enabled)
+        )
+        view_menu.addAction(self._thumbnails_action)
         view_menu.addAction(translate("MainWindow", "Close all tabs"), self._close_all_tabs)
         view_menu.addSeparator()
         theme_menu = view_menu.addMenu(translate("MainWindow", "Theme"))
@@ -3636,13 +3647,28 @@ class MainWindow(QMainWindow):
         self._viewer_tabs.setCurrentIndex(idx)
         self._refresh_tab_labels()
 
-    def _close_tab(self, index: int) -> None:
+    def _dispose_tab(self, index: int) -> None:
+        from crush.viewers.media_viewer import MediaViewer
+
+        widget = self._viewer_tabs.widget(index)
+        if widget is None:
+            return
+        # removeTab() neither closes nor destroys the page. Media may also
+        # be nested inside the optional View/Hex tabs or a banner wrapper.
+        for media in widget.findChildren(MediaViewer):
+            media.close()
+        widget.close()
         self._viewer_tabs.removeTab(index)
+        widget.deleteLater()
+
+    def _close_tab(self, index: int) -> None:
+        self._dispose_tab(index)
         self._props_panel.clear()
         self._refresh_tab_labels()
 
     def _close_all_tabs(self) -> None:
-        self._viewer_tabs.clear()
+        for i in range(self._viewer_tabs.count() - 1, -1, -1):
+            self._dispose_tab(i)
         self._props_panel.clear()
         self._refresh_tab_labels()
 
@@ -3650,7 +3676,7 @@ class MainWindow(QMainWindow):
         keep_widget = self._viewer_tabs.widget(keep_index)
         for i in range(self._viewer_tabs.count() - 1, -1, -1):
             if self._viewer_tabs.widget(i) is not keep_widget:
-                self._viewer_tabs.removeTab(i)
+                self._dispose_tab(i)
         self._props_panel.clear()
         self._refresh_tab_labels()
 
@@ -3762,7 +3788,7 @@ class MainWindow(QMainWindow):
             if w is None:
                 continue
             if w.property("crush_vfs") is vfs:
-                self._viewer_tabs.removeTab(i)
+                self._dispose_tab(i)
                 closed += 1
         if closed:
             self._refresh_tab_labels()
@@ -3996,6 +4022,8 @@ class MainWindow(QMainWindow):
         self._drop_overlay.dropEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._fs_panel._thumbnails.set_enabled(False)
+        self._close_all_tabs()
         self._status.showMessage(translate("MainWindow", "Closing…"))
         if hasattr(self, "_logger"):
             self._logger.info("Closing application")

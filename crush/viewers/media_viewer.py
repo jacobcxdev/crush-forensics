@@ -81,7 +81,7 @@ class MediaViewer(QWidget):
         self._buf: QBuffer | None = None
         self._pcm_bpm = 0  # bytes per millisecond
         self._pcm_duration_ms = 0
-        self._pcm_timer = QTimer()
+        self._pcm_timer = QTimer(self)
         self._pcm_timer.setInterval(200)
         self._pcm_timer.timeout.connect(self._update_pcm_position)
         self._build_ui()
@@ -96,8 +96,8 @@ class MediaViewer(QWidget):
         layout.addWidget(self._video_widget, stretch=1)
 
         # Qt player (used for video and non-OGG audio)
-        self._player = QMediaPlayer()
-        self._audio = QAudioOutput()
+        self._player = QMediaPlayer(self)
+        self._audio = QAudioOutput(self)
         self._player.setAudioOutput(self._audio)
         self._player.setVideoOutput(self._video_widget)
         self._audio.setVolume(0.8)
@@ -168,11 +168,11 @@ class MediaViewer(QWidget):
         fmt.setChannelCount(channels)
         fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
 
-        self._buf = QBuffer()
+        self._buf = QBuffer(self)
         self._buf.setData(pcm)
         self._buf.open(QIODeviceBase.OpenModeFlag.ReadOnly)
 
-        self._sink = QAudioSink(QMediaDevices.defaultAudioOutput(), fmt)
+        self._sink = QAudioSink(QMediaDevices.defaultAudioOutput(), fmt, self)
         self._sink.setVolume(0.8)
         self._sink.start(self._buf)  # pull mode
         self._play_btn.setText(translate("MediaViewer", "Pause"))
@@ -263,6 +263,8 @@ class MediaViewer(QWidget):
         if self._sink is not None:
             self._sink.stop()
         self._player.stop()
+        # Release the decoder's file handle before unlinking on Windows.
+        self._player.setSource(QUrl())
         if self._tmp_path and os.path.exists(self._tmp_path):
             os.unlink(self._tmp_path)
         super().closeEvent(event)

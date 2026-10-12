@@ -30,6 +30,7 @@ from crush.core.vfs import VFS, VFSNode
 from crush.core.magic import detect_fast_label
 from crush.core.work_priority import background_io
 from crush.ui.log_scope import window_log_scope
+from crush.ui.image_thumbnails import ThumbnailPreviews
 from crush.ui.wheel_scroll import install_horizontal_wheel_scroll
 from crush.ui.i18n import translate
 
@@ -186,6 +187,13 @@ class FilesystemPanel(QWidget):
         self._activities: set[str] = set()
         self.background_status.emit("")
         self._build_ui()
+        self._thumbnails = ThumbnailPreviews(
+            (self._tree, self._search_view), _ROLE_NODE, _ROLE_VFS, self,
+        )
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._thumbnails.set_enabled(False)
+        super().closeEvent(event)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -253,6 +261,7 @@ class FilesystemPanel(QWidget):
 
     def load_vfs(self, vfs: VFS) -> None:
         """Replace the tree with a new VFS source."""
+        self._thumbnails.clear()
         self._logger.debug("FilesystemPanel.load_vfs: start")
         self._vfs_list = [vfs]
         self._vfs = vfs
@@ -319,6 +328,7 @@ class FilesystemPanel(QWidget):
         """Remove a VFS source from the tree."""
         if vfs not in self._vfs_list:
             return
+        self._thumbnails.clear()
         self._logger.debug("FilesystemPanel.close_vfs: start")
         self._vfs_list = [item for item in self._vfs_list if item is not vfs]
         self._vfs = self._vfs_list[-1] if self._vfs_list else None
